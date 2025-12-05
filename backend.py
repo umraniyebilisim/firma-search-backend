@@ -12,50 +12,33 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Fallback, HTML tarafı apiKey'i body ile gönderiyor
-GOOGLE_API_KEY = "YOUR_API_KEY"
-
-
 def guess_sector(place):
-    name = place.get("name", "").lower()
+    name = (place.get("name") or "").lower()
     types = place.get("types", [])
 
-    if "restaurant" in types or "food" in types:
-        return "restaurant"
-    if "health" in types or "hospital" in types:
-        return "health"
-    if "real_estate" in types or "estate" in name:
-        return "real_estate"
-    if "car" in name or "oto" in name:
-        return "automotive"
-    if "logistics" in name or "kargo" in name:
-        return "logistics"
-    if "law" in name or "avukat" in name:
+    if "avukat" in name or "law" in types:
         return "law"
-    if "pharmacy" in types or "ecz" in name:
-        return "pharmacy"
-    if "hotel" in types or "otel" in name:
-        return "hospitality"
-    if "school" in types or "kolej" in name:
-        return "education"
-    if "gym" in types or "spor" in name:
-        return "sports"
-    if "bank" in types or "finans" in name:
-        return "finance"
-    if "store" in types or "market" in name:
+    if "kargo" in name or "logistics" in name:
+        return "logistics"
+    if "market" in name or "store" in types:
         return "retail"
-
+    if "restoran" in name or "restaurant" in types:
+        return "restaurant"
+    if "ecz" in name:
+        return "pharmacy"
     return "other"
 
 
 def google_nearby(lat, lng, radius, keyword, api_key):
     url = (
         "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
-        f"?location={lat},{lng}&radius={radius}"
+        f"?location={lat},{lng}&radius={radius}&key={api_key}"
     )
     if keyword:
         url += f"&keyword={keyword}"
-    url += f"&key={api_key}"
+
+    print("Nearby URL:", url)  # DEBUG
+
     return requests.get(url).json()
 
 
@@ -63,28 +46,37 @@ def google_details(place_id, api_key):
     url = (
         "https://maps.googleapis.com/maps/api/place/details/json"
         f"?place_id={place_id}"
-        f"&fields=name,formatted_phone_number,website,geometry"
+        f"&fields=name,formatted_phone_number,website,geometry,types"
         f"&key={api_key}"
     )
+
+    print("Details URL:", url)  # DEBUG
+
     return requests.get(url).json()
 
 
 @app.post("/scan")
 def scan(payload: dict):
+
     lat = payload.get("lat")
     lng = payload.get("lng")
     radius = payload.get("radius", 5000)
-    keyword = payload.get("keyword", "")
-    api_key = payload.get("apiKey") or GOOGLE_API_KEY
+    keyword = payload.get("keyword", "").strip()
+    api_key = payload.get("apiKey")
 
-    if not (lat and lng):
+    if not lat or not lng:
         return {"firms": []}
 
-    resp = google_nearby(lat, lng, radius, keyword, api_key)
-    results = resp.get("results", [])
+    # 1) İlk ham veri çekimi
+    nearby = google_nearby(lat, lng, radius, keyword, api_key)
+    results = nearby.get("results", [])
 
-    final = []
-    for place in results[:40]:
+    print("Nearby count:", len(results))  # DEBUG
+
+    firms = []
+
+    # 2) Daha fazla firma gelsin diye 60 tanesine kadar bakıyoruz
+    for place in results[:60]:
         pid = place.get("place_id")
         if not pid:
             continue
@@ -93,28 +85,29 @@ def scan(payload: dict):
         result = detail.get("result", {})
 
         phone = result.get("formatted_phone_number")
-        website = result.get("website")
 
-        # Sadece telefon ve web sitesi olanlar
-        if not phone or not website:
-            continue
+        # 🔥 Website ZORUNLU DEĞİL → CRM'de seçenekli zaten
+        if not phone:
+            continue  # sadece telefon zorunlu
 
+        name = result.get("name", "")
         geom = result.get("geometry", {}).get("location", {})
-        lat2 = geom.get("lat")
-        lng2 = geom.get("lng")
 
         firm = {
             "id": pid,
-            "name": result.get("name", "Bilinmeyen Firma"),
+            "name": name,
             "phone": phone,
-            "website": website,
-            "lat": lat2,
-            "lng": lng2,
-            "sector": guess_sector(place),
+            "website": result.get("website", ""),  # opsiyonel
+            "lat": geom.get("lat"),
+            "lng": geom.get("lng"),
+            "sector": guess_sector(result),
         }
-        final.append(firm)
 
-        if len(final) >= 20:
+        firms.append(firm)
+
+        if len(firms) >= 20:
             break
 
-    return {"firms": final}
+    print("Final firm count:", len(firms))
+
+    return {"firms": firms}
